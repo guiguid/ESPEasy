@@ -1,6 +1,5 @@
-#define ESP_CORE 210
 /****************************************************************************************************************************\
- * Arduino project "ESP Easy" © Copyright www.esp8266.nu
+ * Arduino project "ESP Easy" © Copyright www.letscontrolit.com
  *
  * This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -11,9 +10,9 @@
  * IDE download    : https://www.arduino.cc/en/Main/Software
  * ESP8266 Package : https://github.com/esp8266/Arduino
  *
- * Source Code     : https://sourceforge.net/projects/espeasy/
- * Support         : http://www.esp8266.nu
- * Discussion      : http://www.esp8266.nu/forum/
+ * Source Code     : https://github.com/ESP8266nu/ESPEasy
+ * Support         : http://www.letscontrolit.com
+ * Discussion      : http://www.letscontrolit.com/forum/
  *
  * Additional information about licensing can be found at : http://www.gnu.org/licenses
 \*************************************************************************************************************************/
@@ -40,7 +39,7 @@
 //   Analog input (ESP-7/12 only)
 //   Pulse counters
 //   Dallas OneWire DS18b20 temperature sensors
-//   DHT11/22 humidity sensors
+//   DHT11/22/12 humidity sensors
 //   BMP085 I2C Barometric Pressure sensor
 //   PCF8591 4 port Analog to Digital converter (I2C)
 //   RFID Wiegand-26 reader
@@ -62,11 +61,9 @@
 //   INA219 I2C voltage/current sensor
 //   BME280 I2C temp/hum/baro sensor
 //   MSP5611 I2C temp/baro sensor
-
-//   Experimental/Preliminary:
-//   =========================
+//   BMP280 I2C Barometric Pressure sensor
+//   SHT1X temperature/humidity sensors
 //   Ser2Net server
-//   Local Level Control to GPIO
 
 // ********************************************************************************
 //   User specific configuration
@@ -102,6 +99,9 @@
 //   5 = OpenHAB MQTT
 //   6 = PiDome MQTT
 //   7 = EmonCMS
+//   8 = Generic HTTP
+//   9 = FHEM HTTP
+
 #define UNIT                0
 
 #define FEATURE_TIME                     true
@@ -118,14 +118,23 @@
 #define ESP_PROJECT_PID           2015050101L
 #define ESP_EASY
 #define VERSION                             9
-#define BUILD                             108
+#define BUILD                             147
+#define BUILD_NOTES                        ""
 #define FEATURE_SPIFFS                  false
+
+#define NODE_TYPE_ID_ESP_EASY_STD           1
+#define NODE_TYPE_ID_ESP_EASYM_STD         17
+#define NODE_TYPE_ID_ESP_EASY32_STD        33
+#define NODE_TYPE_ID_ARDUINO_EASY_STD      65
+#define NODE_TYPE_ID                        NODE_TYPE_ID_ESP_EASY_STD
 
 #define CPLUGIN_PROTOCOL_ADD                1
 #define CPLUGIN_PROTOCOL_TEMPLATE           2
 #define CPLUGIN_PROTOCOL_SEND               3
 #define CPLUGIN_PROTOCOL_RECV               4
 #define CPLUGIN_GET_DEVICENAME              5
+#define CPLUGIN_WEBFORM_SAVE                6
+#define CPLUGIN_WEBFORM_LOAD                7
 
 #define LOG_LEVEL_ERROR                     1
 #define LOG_LEVEL_INFO                      2
@@ -144,7 +153,7 @@
 #define PLUGIN_CONFIGLONGVAR_MAX            4
 #define PLUGIN_EXTRACONFIGVAR_MAX          16
 #define CPLUGIN_MAX                        16
-#define UNIT_MAX                           32
+#define UNIT_MAX                           32 // Only relevant for UDP unicast message 'sweeps' and the nodelist.
 #define RULES_TIMER_MAX                     8
 #define SYSTEM_TIMER_MAX                    8
 #define SYSTEM_CMD_TIMER_MAX                2
@@ -165,11 +174,15 @@
 #define DEVICE_TYPE_I2C                     2  // connected through I2C
 #define DEVICE_TYPE_ANALOG                  3  // tout pin
 #define DEVICE_TYPE_DUAL                    4  // connected through 2 datapins
+#define DEVICE_TYPE_DUMMY                  99  // Dummy device, has no physical connection
 
 #define SENSOR_TYPE_SINGLE                  1
 #define SENSOR_TYPE_TEMP_HUM                2
 #define SENSOR_TYPE_TEMP_BARO               3
 #define SENSOR_TYPE_TEMP_HUM_BARO           4
+#define SENSOR_TYPE_DUAL                    5
+#define SENSOR_TYPE_TRIPLE                  6
+#define SENSOR_TYPE_QUAD                    7
 #define SENSOR_TYPE_SWITCH                 10
 #define SENSOR_TYPE_DIMMER                 11
 #define SENSOR_TYPE_LONG                   20
@@ -209,6 +222,7 @@
 #include <WiFiUdp.h>
 #include <ESP8266WebServer.h>
 #include <Wire.h>
+#include <SPI.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <LiquidCrystal_I2C.h>
@@ -218,13 +232,13 @@
 #endif
 #include <ESP8266HTTPUpdateServer.h>
 ESP8266HTTPUpdateServer httpUpdater(true);
-#if ESP_CORE >= 210
-  #include <base64.h>
-#endif
+#include <base64.h>
 #if FEATURE_ADC_VCC
 ADC_MODE(ADC_VCC);
 #endif
+#ifndef LWIP_OPEN_SRC
 #define LWIP_OPEN_SRC
+#endif
 #include "lwip/opt.h"
 #include "lwip/udp.h"
 #include "lwip/igmp.h"
@@ -243,7 +257,8 @@ Servo myservo1;
 Servo myservo2;
 
 // MQTT client
-PubSubClient MQTTclient("");
+WiFiClient mqtt;
+PubSubClient MQTTclient(mqtt);
 
 // WebServer
 ESP8266WebServer WebServer(80);
@@ -311,7 +326,7 @@ struct SettingsStruct
   boolean       TaskDeviceSendData[TASKS_MAX];
   int16_t       Build;
   byte          DNS[4];
-  int8_t        TimeZone;
+  int8_t        TimeZone_OLD;
   char          ControllerHostName[64];
   boolean       UseNTP;
   boolean       DST;
@@ -329,6 +344,9 @@ struct SettingsStruct
   unsigned long WireClockStretchLimit;
   boolean       GlobalSync;
   unsigned long ConnectionFailuresThreshold;
+  int16_t       TimeZone;
+  boolean       MQTTRetainFlag;
+  boolean       InitSPI; 
 } Settings;
 
 struct ExtraTaskSettingsStruct
@@ -379,6 +397,7 @@ struct DeviceStruct
   boolean GlobalSyncOption;
   boolean TimerOption;
   boolean TimerOptional;
+  boolean DecimalsOnly;
 } Device[DEVICES_MAX + 1]; // 1 more because first device is empty device
 
 struct ProtocolStruct
@@ -388,12 +407,16 @@ struct ProtocolStruct
   boolean usesAccount;
   boolean usesPassword;
   int defaultPort;
+  boolean usesTemplate;
 } Protocol[CPLUGIN_MAX];
 
 struct NodeStruct
 {
   byte ip[4];
   byte age;
+  uint16_t build;
+  char* nodeName;
+  byte nodeType;
 } Nodes[UNIT_MAX];
 
 struct systemTimerStruct
@@ -468,6 +491,8 @@ unsigned long elapsed = 0;
 unsigned long loopCounter = 0;
 unsigned long loopCounterLast = 0;
 unsigned long loopCounterMax = 1;
+
+unsigned long flashWrites = 0;
 
 String eventBuffer = "";
 
@@ -580,12 +605,6 @@ void setup()
 
     saveToRTC(0);
 
-    if (Settings.UseRules)
-    {
-      String event = F("System#Boot");
-      rulesProcessing(event);
-    }
-
     // Setup timers
     if (bootMode == 0)
     {
@@ -620,6 +639,12 @@ void setup()
     // (captive portal concept)
     if (wifiSetup)
       dnsServer.start(DNS_PORT, "*", apIP);
+
+    if (Settings.UseRules)
+    {
+      String event = F("System#Boot");
+      rulesProcessing(event);
+    }
 
   }
   else
@@ -805,6 +830,8 @@ void checkSensors()
       saveToRTC(1);
       String log = F("Enter deep sleep...");
       addLog(LOG_LEVEL_INFO, log);
+      String event = F("System#Sleep");
+      rulesProcessing(event);
       ESP.deepSleep(Settings.Delay * 1000000, WAKE_RF_DEFAULT); // Sleep for set delay
     }
   }
@@ -986,6 +1013,7 @@ void backgroundtasks()
   WebServer.handleClient();
   MQTTclient.loop();
   statusLED(false);
+  checkUDP();
   yield();
 }
 

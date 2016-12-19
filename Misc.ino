@@ -1,6 +1,41 @@
 /*********************************************************************************************\
+   Get value count from sensor type
+  \*********************************************************************************************/
+
+byte getValueCountFromSensorType(byte sensorType)
+{
+  byte valueCount = 0;
+
+  switch (sensorType)
+  {
+    case SENSOR_TYPE_SINGLE:                      // single value sensor, used for Dallas, BH1750, etc
+    case SENSOR_TYPE_SWITCH:
+    case SENSOR_TYPE_DIMMER:
+      valueCount = 1;
+      break;
+    case SENSOR_TYPE_LONG:                      // single LONG value, stored in two floats (rfid tags)
+      valueCount = 1;
+      break;
+    case SENSOR_TYPE_TEMP_HUM:
+    case SENSOR_TYPE_TEMP_BARO:
+    case SENSOR_TYPE_DUAL:
+      valueCount = 2;
+      break;
+    case SENSOR_TYPE_TEMP_HUM_BARO:
+    case SENSOR_TYPE_TRIPLE:
+      valueCount = 3;
+      break;
+    case SENSOR_TYPE_QUAD:
+      valueCount = 4;
+      break;
+  }
+  return valueCount;
+}
+
+
+/*********************************************************************************************\
    Workaround for removing trailing white space when String() converts a float with 0 decimals
-\*********************************************************************************************/
+  \*********************************************************************************************/
 String toString(float value, byte decimals)
 {
   String sValue = String(value, decimals);
@@ -43,14 +78,14 @@ int getParamStartPos(String& string, byte indexFind)
   String tmpString = string;
   byte count = 0;
   tmpString.replace(" ", ",");
-  for (int x=0; x < tmpString.length(); x++)
+  for (int x = 0; x < tmpString.length(); x++)
   {
-    if(tmpString.charAt(x) == ',')
-      {
-        count++;
-        if (count == (indexFind -1))
-         return x+1;
-      }
+    if (tmpString.charAt(x) == ',')
+    {
+      count++;
+      if (count == (indexFind - 1))
+        return x + 1;
+    }
   }
   return -1;
 }
@@ -290,7 +325,7 @@ void taskClear(byte taskIndex, boolean save)
 
   for (byte varNr = 0; varNr < PLUGIN_EXTRACONFIGVAR_MAX; varNr++)
     ExtraTaskSettings.TaskDevicePluginConfigLong[varNr] = 0;
-  
+
   if (save)
   {
     SaveTaskSettings(taskIndex);
@@ -392,6 +427,12 @@ void BuildFixes()
     }
   }
 
+  if (Settings.Build < 112)
+  {
+    Serial.println(F("Fix timezone"));
+    Settings.TimeZone = Settings.TimeZone_OLD * 60;
+  }
+
   Settings.Build = BUILD;
   SaveSettings();
 }
@@ -425,6 +466,8 @@ void fileSystemCheck()
           f.write(0);
         f.close();
       }
+      f = SPIFFS.open("rules.txt", "w");
+      f.close();
     }
   }
   else
@@ -644,6 +687,36 @@ void LoadCustomTaskSettings(int TaskIndex, byte* memAddress, int datasize)
 }
 
 
+/********************************************************************************************\
+  Save Custom Controller settings to SPIFFS
+  \*********************************************************************************************/
+void SaveCustomControllerSettings(byte* memAddress, int datasize)
+{
+  if (datasize > 4096)
+    return;
+#if FEATURE_SPIFFS
+  SaveToFile((char*)"config.txt", 28672, memAddress, datasize);
+#else
+  SaveToFlash(28672, memAddress, datasize);
+#endif
+}
+
+
+/********************************************************************************************\
+  Save Custom Controller settings to SPIFFS
+  \*********************************************************************************************/
+void LoadCustomControllerSettings(byte* memAddress, int datasize)
+{
+  if (datasize > 4096)
+    return;
+#if FEATURE_SPIFFS
+  LoadFromFile((char*)"config.txt", 28672, memAddress, datasize);
+#else
+  LoadFromFlash(28672, memAddress, datasize);
+#endif
+}
+
+
 #if FEATURE_SPIFFS
 /********************************************************************************************\
   Save data into config file on SPIFFS
@@ -723,6 +796,7 @@ void SaveToFlash(int index, byte* memAddress, int datasize)
   delete [] data;
   String log = F("FLASH: Settings saved");
   addLog(LOG_LEVEL_INFO, log);
+  flashWrites++;
 }
 
 
@@ -859,6 +933,8 @@ void ResetFactory(void)
       f.write(0);
     f.close();
   }
+  f = SPIFFS.open("rules.txt", "w");
+  f.close();
 #else
   EraseFlash();
   ZeroFillFlash();
@@ -866,7 +942,7 @@ void ResetFactory(void)
 
   LoadSettings();
   // now we set all parameters that need to be non-zero as default value
-  
+
 #if DEFAULT_USE_STATIC_IP
   str2ip((char*)DEFAULT_IP, Settings.IP);
   str2ip((char*)DEFAULT_DNS, Settings.DNS);
@@ -900,6 +976,7 @@ void ResetFactory(void)
   Settings.MessageDelay = 1000;
   Settings.deepSleep = false;
   Settings.CustomCSS = false;
+  Settings.InitSPI = false;
   for (byte x = 0; x < TASKS_MAX; x++)
   {
     Settings.TaskDevicePin1[x] = -1;
@@ -1060,7 +1137,7 @@ unsigned long string2TimeLong(String &str)
   unsigned long a;
   str.toLowerCase();
   str.toCharArray(command, 20);
-  unsigned long lngTime;
+  unsigned long lngTime = 0;
 
   if (GetArgv(command, TmpStr1, 1))
   {
@@ -1164,6 +1241,7 @@ String parseTemplate(String &tmpString, byte lineSize)
   else
   {
     byte count = 0;
+    byte currentTaskIndex = ExtraTaskSettings.TaskIndex;
     while (leftBracketIndex >= 0 && count < 10 - 1)
     {
       newString += tmpString.substring(0, leftBracketIndex);
@@ -1194,8 +1272,13 @@ String parseTemplate(String &tmpString, byte lineSize)
                 if (valueName.equalsIgnoreCase(ExtraTaskSettings.TaskDeviceValueNames[z]))
                 {
                   // here we know the task and value, so find the uservar
-                  String value = toString(UserVar[y * VARS_PER_TASK + z], ExtraTaskSettings.TaskDeviceValueDecimals[z]);
-                  
+                  String value = "";
+                  byte DeviceIndex = getDeviceIndex(Settings.TaskDeviceNumber[y]);
+                  if (Device[DeviceIndex].VType == SENSOR_TYPE_LONG)
+                    value = (unsigned long)UserVar[y * VARS_PER_TASK + z] + ((unsigned long)UserVar[y * VARS_PER_TASK + z + 1] << 16);
+                  else
+                    value = toString(UserVar[y * VARS_PER_TASK + z], ExtraTaskSettings.TaskDeviceValueDecimals[z]);
+
                   if (valueFormat == "R")
                   {
                     int filler = lineSize - newString.length() - value.length() - tmpString.length() ;
@@ -1214,6 +1297,7 @@ String parseTemplate(String &tmpString, byte lineSize)
       count++;
     }
     newString += tmpString;
+    LoadTaskSettings(currentTaskIndex);
   }
 
   // replace other system variables like %sysname%, %systime%, %ip%
@@ -1242,6 +1326,8 @@ String parseTemplate(String &tmpString, byte lineSize)
   sprintf_P(strIP, PSTR("%u.%u.%u.%u"), ip[0], ip[1], ip[2], ip[3]);
   newString.replace("%ip%", strIP);
 
+  newString.replace("%sysload%", String(100 - (100 * loopCounterLast / loopCounterMax)));
+  
   // padding spaces
   while (newString.length() < lineSize)
     newString += " ";
@@ -1265,7 +1351,7 @@ float globalstack[STACK_SIZE];
 float *sp = globalstack - 1;
 float *sp_max = &globalstack[STACK_SIZE - 1];
 
-#define is_operator(c)  (c == '+' || c == '-' || c == '*' || c == '/' )
+#define is_operator(c)  (c == '+' || c == '-' || c == '*' || c == '/' || c == '^')
 
 int push(float value)
 {
@@ -1296,6 +1382,9 @@ float apply_operator(char op, float first, float second)
       return first * second;
     case '/':
       return first / second;
+    case '^':
+      return pow(first, second);
+    default:
       return 0;
   }
 }
@@ -1336,6 +1425,8 @@ int op_preced(const char c)
 {
   switch (c)
   {
+    case '^':
+      return 3;
     case '*':
     case '/':
       return 2;
@@ -1350,6 +1441,7 @@ bool op_left_assoc(const char c)
 {
   switch (c)
   {
+    case '^':
     case '*':
     case '/':
     case '+':
@@ -1364,6 +1456,7 @@ unsigned int op_arg_count(const char c)
 {
   switch (c)
   {
+    case '^':
     case '*':
     case '/':
     case '+':
@@ -1637,6 +1730,7 @@ int weekday()
 
 void initTime()
 {
+  nextSyncTime = 0;
   now();
 }
 
@@ -1670,66 +1764,72 @@ unsigned long getNtpTime()
 {
   WiFiUDP udp;
   udp.begin(123);
-  String log = F("NTP  : NTP sync requested");
-  addLog(LOG_LEVEL_DEBUG_MORE, log);
+  for (byte x = 1; x < 4; x++)
+  {
+    String log = F("NTP  : NTP sync request:");
+    log += x;
+    addLog(LOG_LEVEL_DEBUG_MORE, log);
 
-  const int NTP_PACKET_SIZE = 48; // NTP time is in the first 48 bytes of message
-  byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming & outgoing packets
+    const int NTP_PACKET_SIZE = 48; // NTP time is in the first 48 bytes of message
+    byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming & outgoing packets
 
-  IPAddress timeServerIP;
-  const char* ntpServerName = "pool.ntp.org";
+    IPAddress timeServerIP;
+    const char* ntpServerName = "pool.ntp.org";
 
-  if (Settings.NTPHost[0] != 0)
-    WiFi.hostByName(Settings.NTPHost, timeServerIP);
-  else
-    WiFi.hostByName(ntpServerName, timeServerIP);
+    if (Settings.NTPHost[0] != 0)
+      WiFi.hostByName(Settings.NTPHost, timeServerIP);
+    else
+      WiFi.hostByName(ntpServerName, timeServerIP);
 
-  char host[20];
-  sprintf_P(host, PSTR("%u.%u.%u.%u"), timeServerIP[0], timeServerIP[1], timeServerIP[2], timeServerIP[3]);
-  log = F("NTP  : NTP send to ");
-  log += host;
-  addLog(LOG_LEVEL_DEBUG_MORE, log);
+    char host[20];
+    sprintf_P(host, PSTR("%u.%u.%u.%u"), timeServerIP[0], timeServerIP[1], timeServerIP[2], timeServerIP[3]);
+    log = F("NTP  : NTP send to ");
+    log += host;
+    addLog(LOG_LEVEL_DEBUG_MORE, log);
 
-  while (udp.parsePacket() > 0) ; // discard any previously received packets
+    while (udp.parsePacket() > 0) ; // discard any previously received packets
 
-  memset(packetBuffer, 0, NTP_PACKET_SIZE);
-  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
-  packetBuffer[1] = 0;     // Stratum, or type of clock
-  packetBuffer[2] = 6;     // Polling Interval
-  packetBuffer[3] = 0xEC;  // Peer Clock Precision
-  packetBuffer[12]  = 49;
-  packetBuffer[13]  = 0x4E;
-  packetBuffer[14]  = 49;
-  packetBuffer[15]  = 52;
-  udp.beginPacket(timeServerIP, 123); //NTP requests are to port 123
-  udp.write(packetBuffer, NTP_PACKET_SIZE);
-  udp.endPacket();
+    memset(packetBuffer, 0, NTP_PACKET_SIZE);
+    packetBuffer[0] = 0b11100011;   // LI, Version, Mode
+    packetBuffer[1] = 0;     // Stratum, or type of clock
+    packetBuffer[2] = 6;     // Polling Interval
+    packetBuffer[3] = 0xEC;  // Peer Clock Precision
+    packetBuffer[12]  = 49;
+    packetBuffer[13]  = 0x4E;
+    packetBuffer[14]  = 49;
+    packetBuffer[15]  = 52;
+    udp.beginPacket(timeServerIP, 123); //NTP requests are to port 123
+    udp.write(packetBuffer, NTP_PACKET_SIZE);
+    udp.endPacket();
 
-  uint32_t beginWait = millis();
-  while (millis() - beginWait < 1500) {
-    int size = udp.parsePacket();
-    if (size >= NTP_PACKET_SIZE) {
-      udp.read(packetBuffer, NTP_PACKET_SIZE);  // read packet into the buffer
-      unsigned long secsSince1900;
-      // convert four bytes starting at location 40 to a long integer
-      secsSince1900 =  (unsigned long)packetBuffer[40] << 24;
-      secsSince1900 |= (unsigned long)packetBuffer[41] << 16;
-      secsSince1900 |= (unsigned long)packetBuffer[42] << 8;
-      secsSince1900 |= (unsigned long)packetBuffer[43];
-      log = F("NTP  : NTP replied!");
-      addLog(LOG_LEVEL_DEBUG_MORE, log);
-      return secsSince1900 - 2208988800UL + Settings.TimeZone * SECS_PER_HOUR;
+    uint32_t beginWait = millis();
+    while (millis() - beginWait < 1000) {
+      int size = udp.parsePacket();
+      if (size >= NTP_PACKET_SIZE) {
+        udp.read(packetBuffer, NTP_PACKET_SIZE);  // read packet into the buffer
+        unsigned long secsSince1900;
+        // convert four bytes starting at location 40 to a long integer
+        secsSince1900 =  (unsigned long)packetBuffer[40] << 24;
+        secsSince1900 |= (unsigned long)packetBuffer[41] << 16;
+        secsSince1900 |= (unsigned long)packetBuffer[42] << 8;
+        secsSince1900 |= (unsigned long)packetBuffer[43];
+        log = F("NTP  : NTP replied: ");
+        log += millis() - beginWait;
+        log += F(" mSec");
+        addLog(LOG_LEVEL_DEBUG_MORE, log);
+        return secsSince1900 - 2208988800UL + Settings.TimeZone * SECS_PER_MIN;
+      }
     }
+    log = F("NTP  : No reply");
+    addLog(LOG_LEVEL_DEBUG_MORE, log);
   }
-  log = F("NTP  : No reply");
-  addLog(LOG_LEVEL_DEBUG_MORE, log);
   return 0;
 }
 #endif
 
 
 /********************************************************************************************\
-  Very Experimental rules processing
+  Rules processing
   \*********************************************************************************************/
 void rulesProcessing(String& event)
 {
@@ -1740,28 +1840,43 @@ void rulesProcessing(String& event)
 
   nestingLevel++;
   if (nestingLevel > RULES_MAX_NESTING_LEVEL)
-    {
-      log = F("EVENT: Error: Nesting level exceeded!");
-      addLog(LOG_LEVEL_ERROR, log);
-      nestingLevel--;
-      return;
-    }
-  
+  {
+    log = F("EVENT: Error: Nesting level exceeded!");
+    addLog(LOG_LEVEL_ERROR, log);
+    nestingLevel--;
+    return;
+  }
+
   log = F("EVENT: ");
   log += event;
   addLog(LOG_LEVEL_INFO, log);
 
   // load rules from flash memory, stored in offset block 10
   if (data == NULL)
+  {
+    data = new uint8_t[RULES_MAX_SIZE];
+#if FEATURE_SPIFFS
+    File f = SPIFFS.open("rules.txt", "r+");
+    if (f)
     {
-      data = new uint8_t[RULES_MAX_SIZE];
-      uint32_t _sector = ((uint32_t)&_SPIFFS_start - 0x40200000) / SPI_FLASH_SEC_SIZE;
-      _sector += 10;
-      noInterrupts();
-      spi_flash_read(_sector * SPI_FLASH_SEC_SIZE, reinterpret_cast<uint32_t*>(data), RULES_MAX_SIZE);
-      interrupts();
-      data[RULES_MAX_SIZE-1]=0; // make sure it's terminated!
+      byte *pointerToByteToRead = data;
+      for (int x = 0; x < f.size(); x++)
+      {
+        *pointerToByteToRead = f.read();
+        pointerToByteToRead++;// next byte
+      }
+      data[f.size()] = 0;
+      f.close();
     }
+#else
+    uint32_t _sector = ((uint32_t)&_SPIFFS_start - 0x40200000) / SPI_FLASH_SEC_SIZE;
+    _sector += 10;
+    noInterrupts();
+    spi_flash_read(_sector * SPI_FLASH_SEC_SIZE, reinterpret_cast<uint32_t*>(data), RULES_MAX_SIZE);
+    interrupts();
+#endif
+    data[RULES_MAX_SIZE - 1] = 0; // make sure it's terminated!
+  }
 
   int pos = 0;
   String line = "";
@@ -1787,7 +1902,7 @@ void rulesProcessing(String& event)
         int comment = line.indexOf("//");
         if (comment > 0)
           line = line.substring(0, comment);
-          
+
         line = parseTemplate(line, line.length());
         line.trim();
 
@@ -1862,6 +1977,12 @@ void rulesProcessing(String& event)
           // process the action if it's a command and unconditional, or conditional and the condition matches the if or else block.
           if (isCommand && ((!conditional) || (conditional && (condition == ifBranche))))
           {
+            int equalsPos = event.indexOf("=");
+            if (equalsPos > 0)
+            {
+              String tmpString = event.substring(equalsPos + 1);
+              action.replace("%eventvalue%", tmpString); // substitute %eventvalue% in actions with the actual value from the event
+            }
             log = F("ACT  : ");
             log += action;
             addLog(LOG_LEVEL_INFO, log);
@@ -1882,7 +2003,7 @@ void rulesProcessing(String& event)
   }
 
   nestingLevel--;
-  if(nestingLevel == 0)
+  if (nestingLevel == 0)
   {
     delete [] data;
     data = NULL;
@@ -1899,30 +2020,39 @@ boolean ruleMatch(String& event, String& rule)
   String tmpEvent = event;
   String tmpRule = rule;
 
+  // Special handling of literal string events, they should start with '!'
+  if (event.charAt(0) == '!')
+  {
+    if (event.equalsIgnoreCase(rule))
+      return true;
+    else
+      return false;
+  }
+
   if (event.startsWith("Clock#Time")) // clock events need different handling...
   {
     int pos1 = event.indexOf("=");
     int pos2 = rule.indexOf("=");
     if (pos1 > 0 && pos2 > 0)
     {
-      tmpEvent = event.substring(0,pos1);
-      tmpRule  = rule.substring(0,pos2);
+      tmpEvent = event.substring(0, pos1);
+      tmpRule  = rule.substring(0, pos2);
       if (tmpRule.equalsIgnoreCase(tmpEvent)) // if this is a clock rule
-      { 
+      {
         tmpEvent = event.substring(pos1 + 1);
         tmpRule  = rule.substring(pos2 + 1);
         unsigned long clockEvent = string2TimeLong(tmpEvent);
         unsigned long clockSet = string2TimeLong(tmpRule);
         unsigned long Mask;
         for (byte y = 0; y < 8; y++)
-          {
+        {
           if (((clockSet >> (y * 4)) & 0xf) == 0xf)  // if nibble y has the wildcard value 0xf
-            {
-              Mask = 0xffffffff  ^ (0xFUL << (y * 4)); // Mask to wipe nibble position y.
-              clockEvent &= Mask;                      // clear nibble
-              clockEvent |= (0xFUL << (y * 4));        // fill with wildcard value 0xf
-            }
+          {
+            Mask = 0xffffffff  ^ (0xFUL << (y * 4)); // Mask to wipe nibble position y.
+            clockEvent &= Mask;                      // clear nibble
+            clockEvent |= (0xFUL << (y * 4));        // fill with wildcard value 0xf
           }
+        }
         if (clockEvent == clockSet)
           return true;
         else

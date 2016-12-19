@@ -32,7 +32,6 @@ void hardwareInit()
     String log = F("INIT : I2C");
     addLog(LOG_LEVEL_INFO, log);
     Wire.begin(Settings.Pin_i2c_sda, Settings.Pin_i2c_scl);
-    #if ESP_CORE >= 210
       if(Settings.WireClockStretchLimit)
       {
         String log = F("INIT : I2C custom clockstretchlimit:");
@@ -40,7 +39,6 @@ void hardwareInit()
         addLog(LOG_LEVEL_INFO, log);
         Wire.setClockStretchLimit(Settings.WireClockStretchLimit);
       }
-    #endif
   }
 
   // I2C Watchdog boot status check
@@ -63,6 +61,18 @@ void hardwareInit()
         lastBootCause = BOOT_CAUSE_EXT_WD;
       }
     }
+  }
+  
+  // SPI Init
+  if (Settings.InitSPI)
+  {
+    SPI.setHwCs(false);
+    SPI.begin();
+    addLog(LOG_LEVEL_INFO, (char*)"INIT : SPI Init (without CS)");
+  }
+  else
+  {
+    addLog(LOG_LEVEL_INFO, (char*)"INIT : SPI not enabled");
   }
 }
 

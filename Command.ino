@@ -19,6 +19,33 @@ void ExecuteCommand(byte source, const char *Line)
   // ****************************************
   // commands for debugging
   // ****************************************
+  if (strcasecmp_P(Command, PSTR("sysload")) == 0)
+  {
+    success = true;
+    Serial.print(100 - (100 * loopCounterLast / loopCounterMax));
+    Serial.print(F("% (LC="));
+    Serial.print(int(loopCounterLast / 30));
+    Serial.println(F(")"));
+  }
+  
+  if (strcasecmp_P(Command, PSTR("SerialFloat")) == 0)
+  {
+    success = true;
+    pinMode(1,INPUT);
+    pinMode(3,INPUT);
+    delay(60000);
+  }
+
+  if (strcasecmp_P(Command, PSTR("meminfo")) == 0)
+  {
+    success = true;
+    Serial.print(F("SecurityStruct         : "));
+    Serial.println(sizeof(SecuritySettings));
+    Serial.print(F("SettingsStruct         : "));
+    Serial.println(sizeof(Settings));
+    Serial.print(F("ExtraTaskSettingsStruct: "));
+    Serial.println(sizeof(ExtraTaskSettings));
+  }
 
   if (strcasecmp_P(Command, PSTR("TaskClear")) == 0)
   {
@@ -51,13 +78,6 @@ void ExecuteCommand(byte source, const char *Line)
     }
   }
 
-  if (strcasecmp_P(Command, PSTR("VariableSet")) == 0)
-  {
-    success = true;
-    if (GetArgv(Line, TmpStr1, 3))
-      UserVar[Par1 - 1] = atof(TmpStr1);
-  }
-
   if (strcasecmp_P(Command, PSTR("build")) == 0)
   {
     success = true;
@@ -75,6 +95,23 @@ void ExecuteCommand(byte source, const char *Line)
   // ****************************************
   // commands for rules
   // ****************************************
+
+  if (strcasecmp_P(Command, PSTR("TaskValueSet")) == 0)
+  {
+    success = true;
+    if (GetArgv(Line, TmpStr1, 4))
+    {
+      float result = 0;
+      byte error = Calculate(TmpStr1, &result);
+      UserVar[(VARS_PER_TASK * (Par1 - 1)) + Par2 - 1] = result;
+    }
+  }
+
+  if (strcasecmp_P(Command, PSTR("TaskRun")) == 0)
+  {
+    success = true;
+    SensorSendTask(Par1 -1);
+  }
 
   if (strcasecmp_P(Command, PSTR("TimerSet")) == 0)
   {
@@ -111,17 +148,12 @@ void ExecuteCommand(byte source, const char *Line)
   {
     success = true;
     String event = Line;
-    event.replace(" ", ",");
+    event = event.substring(7);
     int index = event.indexOf(',');
     if (index > 0)
     {
       event = event.substring(index+1);
-      index = event.indexOf(',');
-      if (index > 0)
-      {
-        event = event.substring(index+1);
-        SendUDPCommand(Par1, (char*)event.c_str(), event.length());
-      }      
+      SendUDPCommand(Par1, (char*)event.c_str(), event.length());
     }
   }
 
@@ -129,18 +161,13 @@ void ExecuteCommand(byte source, const char *Line)
   {
     success = true;
     String event = Line;
-    event.replace(" ", ",");
+    event = event.substring(8);
     int index = event.indexOf(',');
     if (index > 0)
     {
-      event = event.substring(index+1);
-      index = event.indexOf(',');
-      if (index > 0)
-      {
-        String topic = event.substring(0,index);
-        String value = event.substring(index+1);
-        MQTTclient.publish(topic, value);
-      }      
+      String topic = event.substring(0,index);
+      String value = event.substring(index+1);
+      MQTTclient.publish(topic.c_str(), value.c_str(),Settings.MQTTRetainFlag);
     }
   }
   
@@ -190,37 +217,6 @@ void ExecuteCommand(byte source, const char *Line)
     }
   }
 
-  // ****************************************
-  // special commands for old nodo plugin
-  // ****************************************
-
-  if (strcasecmp_P(Command, PSTR("DomoticzSend")) == 0)
-  {
-    success = true;
-    if (GetArgv(Line, TmpStr1, 4))
-    {
-      struct EventStruct TempEvent;
-      TempEvent.TaskIndex = 0;
-      TempEvent.BaseVarIndex = (VARS_PER_TASK * TASKS_MAX) - 1;
-      TempEvent.idx = Par2;
-      TempEvent.sensorType = Par1;
-      UserVar[(VARS_PER_TASK * TASKS_MAX) - 1] = atof(TmpStr1);
-      sendData(&TempEvent);
-    }
-  }
-
-  if (strcasecmp(Command, "DomoticzGet") == 0)
-  {
-    success = true;
-    float value = 0;
-    if (Domoticz_getData(Par2, &value))
-    {
-      status = F("DomoticzGet ");
-      status += value;
-    }
-    else
-      status = F("Error getting data");
-  }
 
   // ****************************************
   // configure settings commands
